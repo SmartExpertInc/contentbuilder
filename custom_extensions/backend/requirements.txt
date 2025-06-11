@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+httpx
+psycopg2-binary
+pyppeteer
+Jinja2
+asyncpg # For PostgreSQL
+python-dotenv # To load .env variables
+python-multipart
+

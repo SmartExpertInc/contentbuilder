@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="{{ details.detectedLanguage | default('en') }}">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ details.quizTitle | default('Quiz') }}</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body { 
+            font-family: 'Inter', Arial, sans-serif; 
+            font-size: 10pt; 
+            line-height: 1.6;
+            color: #4B4B4B;
+            background-color: #ffffff;
+            margin: 0;
+            padding: 0;
+        }
+        .quiz-container { 
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+        .quiz-title-section {
+            border-bottom: 3px solid #FF1414;
+            padding-bottom: 15px;
+            margin-bottom: 30px;
+        }
+        .course-title {
+            text-transform: uppercase;
+            font-size: 1.125rem;
+            font-weight: 500;
+            color: black;
+            margin: 0;
+        }
+        .course-label {
+            color: #FF1414;
+            font-weight: 700;
+        }
+        .quiz-title { 
+            font-size: 1.875rem; 
+            line-height: 2.25rem;
+            font-weight: 700; 
+            margin-top: 5px;
+            margin-bottom: 0;
+            text-transform: none;
+            color: #1a1a1a;
+        }
+        .lesson-label {
+            color: #FF1414;
+            font-weight: 700;
+        }
+        
+        .question-block { 
+            margin-bottom: 25px; 
+            page-break-inside: avoid;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background-color: #ffffff;
+            transition: box-shadow 0.3s;
+        }
+        .question-block:hover {
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .question-header {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        .question-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #FF1414;
+            color: #fff;
+            font-weight: 700;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            font-size: 12pt;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        .question-text { 
+            font-weight: 600; 
+            color: #2c3e50;
+            font-size: 12pt;
+            flex-grow: 1;
+        }
+
+        .options-list { 
+            padding-left: 45px; 
+            margin: 0;
+            list-style-type: none;
+        }
+        .options-list li {
+            margin-bottom: 10px;
+            padding-left: 25px;
+            position: relative;
+        }
+        .options-list li:before {
+            content: attr(data-id) ".";
+            position: absolute;
+            left: 0;
+            font-weight: 600;
+            color: #34495e;
+        }
+
+        .answer-key { 
+            page-break-before: always;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 3px solid #FF1414;
+        }
+        .answer-key-title {
+            font-size: 16pt;
+            font-weight: 700;
+            margin-bottom: 25px;
+            color: #FF1414;
+            text-transform: uppercase;
+        }
+        .answer-block {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-left: 4px solid #3498db;
+            border-radius: 4px;
+        }
+        .answer-block > strong {
+             color: #2c3e50;
+             font-size: 11pt;
+        }
+        .correct-answer {
+            margin-top: 8px;
+            padding-left: 10px;
+            color: #333;
+        }
+        .explanation {
+            margin-top: 12px;
+            padding: 12px;
+            background-color: #fffbe6;
+            border-left: 4px solid #f1c40f;
+            border-radius: 4px;
+            font-style: italic;
+        }
+        .explanation strong {
+            color: #c29d0b;
+        }
+
+        .matching-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        .matching-table td {
+            padding: 10px;
+            vertical-align: top;
+            border: 1px solid #eee;
+        }
+        .prompts-col {
+            width: 50%;
+            padding-right: 10px;
+        }
+        .options-col {
+            width: 50%;
+            padding-left: 10px;
+        }
+        .matching-table ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        .matching-table li {
+            margin-bottom: 5px;
+        }
+
+        .sorting-list {
+            list-style-type: decimal;
+            padding-left: 45px;
+        }
+        .sorting-list li {
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="quiz-container">
+        {% set quiz_data = details.details %}
+        {% set locale = details.locale %}
+
+        <div class="quiz-title-section">
+            {% if details.parentProjectName %}
+                <h2 class="course-title">
+                    <span class="course-label">{{ locale.courseLabel }}:</span> {{ details.parentProjectName }}
+                </h2>
+                <h1 class="quiz-title">
+                    {% if details.lessonNumber %}
+                        <span class="lesson-label">{{ locale.lessonLabel }} №{{ details.lessonNumber }}:</span> 
+                    {% endif %}
+                    {{ quiz_data.quizTitle | default('Quiz') }}
+                </h1>
+            {% else %}
+                <h1 class="quiz-title">{{ quiz_data.quizTitle | default('Quiz') }}</h1>
+            {% endif %}
+        </div>
+
+        {% for question in quiz_data.questions %}
+            <div class="question-block">
+                <div class="question-header">
+                    <span class="question-number">{{ loop.index }}</span>
+                    <div class="question-text">{{ question.question_text }}</div>
+                </div>
+
+                {# Multiple Choice or Multi-Select #}
+                {% if question.question_type in ['multiple-choice', 'multi-select'] %}
+                    <ul class="options-list">
+                        {% for option in question.options %}
+                            <li data-id="{{ option.id }}">{{ option.text }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+
+                {# Matching #}
+                {% if question.question_type == 'matching' %}
+                    <table class="matching-table">
+                        <tr>
+                            <td class="prompts-col">
+                                <strong>{{ locale.quiz.prompts }}:</strong>
+                                <ul style="list-style-type: none; padding-left: 0;">
+                                {% for prompt in question.prompts %}
+                                    <li>{{ prompt.id }}. {{ prompt.text }}</li>
+                                {% endfor %}
+                                </ul>
+                            </td>
+                            <td class="options-col">
+                                <strong>{{ locale.quiz.options }}:</strong>
+                                <ul style="list-style-type: none; padding-left: 0;">
+                                {% for option in question.options %}
+                                    <li>{{ option.id }}. {{ option.text }}</li>
+                                {% endfor %}
+                                </ul>
+                            </td>
+                        </tr>
+                    </table>
+                {% endif %}
+
+                {# Sorting #}
+                {% if question.question_type == 'sorting' %}
+                    <p><strong>{{ locale.quiz.itemsToSort }}:</strong></p>
+                    <ul class="sorting-list">
+                        {% for item in question.items_to_sort | shuffle %}
+                            <li>{{ item.text }}</li>
+                        {% endfor %}
+                    </ul>
+                {% endif %}
+
+                {# Open Answer #}
+                {% if question.question_type == 'open-answer' %}
+                    <div style="border-bottom: 1px solid #ccc; height: 2em; margin-top: 1em;"></div>
+                {% endif %}
+            </div>
+        {% endfor %}
+
+        <div class="answer-key">
+            <div class="answer-key-title">{{ locale.quiz.answerKey }}</div>
+            {% for question in quiz_data.questions %}
+                <div class="answer-block">
+                    <strong>{{ locale.quiz.question }} {{ loop.index }}: {{ question.question_text }}</strong>
+                    <div class="correct-answer">
+                        {% if question.question_type == 'multiple-choice' %}
+                            <strong>{{ locale.quiz.correctAnswer }}:</strong> {{ question.correct_option_id }}
+                        {% elif question.question_type == 'multi-select' %}
+                            <strong>{{ locale.quiz.correctAnswers }}:</strong> {{ question.correct_option_ids | join(', ') }}
+                        {% elif question.question_type == 'matching' %}
+                            <strong>{{ locale.quiz.correctMatches }}:</strong>
+                            <ul>
+                            {% for prompt_id, option_id in question.correct_matches.items() %}
+                                <li>{{ prompt_id }} - {{ option_id }}</li>
+                            {% endfor %}
+                            </ul>
+                        {% elif question.question_type == 'sorting' %}
+                            <strong>{{ locale.quiz.correctOrder }}:</strong>
+                            <ol>
+                                {% for item_id in question.correct_order %}
+                                    {% for item in question.items_to_sort if item.id == item_id %}
+                                        <li>{{ item.text }}</li>
+                                    {% endfor %}
+                                {% endfor %}
+                            </ol>
+                        {% elif question.question_type == 'open-answer' %}
+                            <strong>{{ locale.quiz.acceptableAnswers }}:</strong> {{ question.acceptable_answers | join(' / ') }}
+                        {% endif %}
+                    </div>
+
+                    {% if question.explanation %}
+                        <div class="explanation"><strong>{{ locale.quiz.explanation }}:</strong> {{ question.explanation }}</div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html> 
