@@ -2,64 +2,112 @@
 
 import React from "react";
 import Link from "next/link";
-import { FileText, Sparkles, UploadCloud } from "lucide-react";
+import { FileText, Sparkles, UploadCloud, Home as HomeIcon } from "lucide-react";
 
-// Simple card component
-const OptionCard: React.FC<{
+// ---------------------------------------------------------------------------
+// Card shown on the landing page. It tries to mimic the folder-looking cards
+// from the reference screenshot (image header + label area).
+// ---------------------------------------------------------------------------
+interface OptionCardProps {
   Icon: React.ElementType;
   title: string;
   description: string;
   href?: string;
   disabled?: boolean;
-}> = ({ Icon, title, description, href, disabled }) => {
-  const content = (
+  pillLabel?: string; // e.g. "POPULAR"
+}
+
+const OptionCard: React.FC<OptionCardProps> = ({
+  Icon,
+  title,
+  description,
+  href,
+  disabled,
+  pillLabel,
+}: OptionCardProps) => {
+  // Card content shared by both link and non-link versions
+  const cardContent = (
     <div
-      className={`flex flex-col items-center justify-center gap-3 border rounded-lg p-6  transition-colors w-full h-full text-center shadow-sm ${
+      className={`flex flex-col items-center justify-start rounded-xl overflow-hidden border transition-colors shadow-sm w-full h-full text-center ${
         disabled
-          ? "bg-white/60 text-gray-400 cursor-not-allowed border-gray-300 shadow-none"
-          : "bg-white/80 hover:bg-white text-gray-900 cursor-pointer shadow border-gray-200"
+          ? "bg-white text-gray-400 cursor-not-allowed border-gray-300 shadow-none"
+          : "bg-white hover:bg-gray-50 text-gray-900 cursor-pointer border-gray-200"
       }`}
     >
-      <Icon size={32} className="mb-1" />
-      <h3 className="font-semibold text-lg">{title}</h3>
-      <p className="text-sm text-gray-500 max-w-xs">{description}</p>
+      {/* "Folder" header */}
+      <div className="w-full h-28 bg-gradient-to-tr from-indigo-300/60 to-pink-200/60 flex items-center justify-center relative">
+        <Icon size={40} className="text-white drop-shadow-md" />
+        {pillLabel && (
+          <span className="absolute bottom-2 right-2 text-[10px] font-bold bg-white text-indigo-600 rounded-md px-1.5 py-0.5 shadow">
+            {pillLabel}
+          </span>
+        )}
+      </div>
+      {/* Text area */}
+      <div className="flex flex-col items-center gap-1 px-4 py-5">
+        <h3 className="font-semibold text-base sm:text-lg leading-tight text-gray-900">{title}</h3>
+        <p className="text-xs sm:text-sm text-gray-600 max-w-xs leading-normal">
+          {description}
+        </p>
+      </div>
     </div>
   );
 
-  if (disabled || !href) return content;
-  return <Link href={href}>{content}</Link>;
+  if (disabled || !href) return cardContent;
+  return <Link href={href}>{cardContent}</Link>;
 };
 
 export default function DataSourceLanding() {
   return (
     <main
-      className="min-h-screen flex flex-col items-center justify-center p-6"
+      className="min-h-screen flex flex-col items-center pt-24 pb-20 px-6"
       style={{
-        background: "linear-gradient(180deg, #FFF9F5 0%, #ECECFF 30%, #BFD7FF 65%, #CCE8FF 100%)",
+        background:
+          "linear-gradient(180deg, rgba(255,249,245,1) 0%, rgba(236,236,255,1) 30%, rgba(191,215,255,1) 60%, rgba(204,232,255,1) 100%)",
       }}
     >
-      <div className="w-full max-w-3xl flex flex-col gap-10">
-        <h1 className="text-3xl font-bold text-center">Choose a data source</h1>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+      {/* Top-left home button */}
+      <Link
+        href="/projects"
+        className="fixed top-4 left-4 flex items-center gap-1 text-sm font-medium bg-white/70 hover:bg-white text-gray-900 backdrop-blur rounded-full px-3 py-1 shadow border border-gray-200"
+      >
+        {/* Home icon */}
+        <HomeIcon size={14} className="-ml-0.5" />
+        Home
+      </Link>
+
+      {/* Main content */}
+      <div className="w-full max-w-4xl flex flex-col gap-10 items-center">
+        {/* Headings */}
+        <div className="flex flex-col gap-2 text-center">
+          <h1 className="text-4xl sm:text-5xl font-bold text-gray-900">Create with AI</h1>
+          <p className="text-base sm:text-lg text-gray-600">How would you like to get started?</p>
+        </div>
+
+        {/* Option cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 w-full">
           <OptionCard
             Icon={FileText}
             title="Paste in text"
-            description="Provide raw text to build your product from."
+            description="Create from notes, an outline, or existing content"
             disabled
           />
           <OptionCard
             Icon={Sparkles}
             title="Generate"
-            description="Have the AI generate content for you from a prompt."
+            description="Create from a one-line prompt in a few seconds"
             href="/create/generate"
+            pillLabel="POPULAR"
           />
           <OptionCard
             Icon={UploadCloud}
             title="Import file or URL"
-            description="Upload a document or reference URL to use as source material."
+            description="Enhance existing docs, presentations, or webpages"
             disabled
           />
         </div>
+
+        {/* Recent prompts section removed as per request */}
       </div>
     </main>
   );

@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, status, File, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from typing import List, Optional, Dict, Any, Union, Type, ForwardRef, Set, Literal
 from pydantic import BaseModel, Field, RootModel
@@ -11,12 +11,14 @@ import os
 import asyncpg
 from datetime import datetime, timezone
 import httpx
-# import traceback # No longer explicitly calling traceback.print_exc()
+from httpx import HTTPStatusError
 import json
 import uuid
 import shutil
 import logging
 from locales.__init__ import LANG_CONFIG
+import asyncio
+import typing
 
 # --- CONTROL VARIABLE FOR PRODUCTION LOGGING ---
 # SET THIS TO True FOR PRODUCTION, False FOR DEVELOPMENT
@@ -1236,7 +1238,7 @@ async def add_project_to_custom_db(project_data: ProjectCreateRequest, onyx_user
 
     2.  **`type: "paragraph"`**
         * `text` (string): Full paragraph text.
-        * `isRecommendation` (boolean, optional): If this paragraph functions as a "Recommendation" (often prefixed with "Рекомендация:" or "Recommendation:"), set this to `true`. Or set this to true if it is a concluding thoght in the very end of the lesson (this case applies only to one VERY last thought). Cannot be 'true' for ALL the elements in one list. HAS to be 'true' if starts with 'Recommendation' or similar and isn't a part of the buller list.
+        * `isRecommendation` (boolean, optional): If this paragraph is a 'recommendation' within a numbered list item, set this to `true`. Or set this to true if it is a concluding thoght in the very end of the lesson (this case applies only to one VERY last thought). Cannot be 'true' for ALL the elements in one list. HAS to be 'true' if starts with 'Recommendation' or similar and isn't a part of the buller list.
 
     3.  **`type: "bullet_list"`**
         * `items` (array of `ListItem`): Can be strings or other nested content blocks.
@@ -2162,3 +2164,276 @@ ProjectDB.model_rebuild()
 MicroProductApiResponse.model_rebuild()
 ProjectDetailForEditResponse.model_rebuild()
 ProjectUpdateRequest.model_rebuild()
+
+# ========================= Wizard Course Outline Endpoints =========================
+
+class OutlineWizardPreview(BaseModel):
+    prompt: str
+    modules: int
+    lessonsPerModule: str
+    language: str = "en"
+
+class OutlineWizardFinalize(BaseModel):
+    prompt: str
+    modules: int
+    lessonsPerModule: str
+    language: str = "en"
+    editedOutline: Dict[str, Any]
+
+_CONTENTBUILDER_PERSONA_CACHE: Optional[int] = None
+
+async def get_contentbuilder_persona_id(cookies: Dict[str, str]) -> int:
+    """Return persona id of the default ContentBuilder assistant (cached)."""
+    global _CONTENTBUILDER_PERSONA_CACHE
+    if _CONTENTBUILDER_PERSONA_CACHE is not None:
+        return _CONTENTBUILDER_PERSONA_CACHE
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(f"{ONYX_API_SERVER_URL}/persona", cookies=cookies)
+        resp.raise_for_status()
+        personas = resp.json()
+        # naive: first persona marked is_default_persona and has name 'ContentBuilder'
+        for p in personas:
+            if p.get("is_default_persona") or "contentbuilder" in p.get("name", "").lower():
+                _CONTENTBUILDER_PERSONA_CACHE = p["id"]
+                return _CONTENTBUILDER_PERSONA_CACHE
+    raise HTTPException(status_code=500, detail="Could not locate ContentBuilder persona")
+
+async def create_onyx_chat_session(persona_id: int, cookies: Dict[str, str]) -> str:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{ONYX_API_SERVER_URL}/chat/create-chat-session",
+            json={"persona_id": persona_id, "description": None},
+            cookies=cookies,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("chat_session_id") or data.get("chatSessionId")
+
+async def stream_chat_message(chat_session_id: str, message: str, cookies: Dict[str, str]) -> str:
+    """Send message via Onyx non-streaming simple API and return the full answer."""
+    logger.debug(f"[stream_chat_message] chat_id={chat_session_id} len(message)={len(message)}")
+
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        minimal_retrieval = {
+            "run_search": "always",
+            "real_time": False,
+        }
+        payload = {
+            "chat_session_id": chat_session_id,
+            "message": message,
+            "parent_message_id": None,
+            "file_descriptors": [],
+            "user_file_ids": [],
+            "user_folder_ids": [],
+            "prompt_id": None,
+            "search_doc_ids": None,
+            "retrieval_options": minimal_retrieval,
+            "stream_response": False,
+        }
+        # Prefer the non-streaming simplified endpoint if available (much faster and avoids nginx timeouts)
+        simple_url = f"{ONYX_API_SERVER_URL}/chat/send-message-simple-api"
+        logger.debug(f"[stream_chat_message] POST {simple_url} (preferred) ...")
+        try:
+            resp = await client.post(simple_url, json=payload, cookies=cookies)
+            if resp.status_code == 404:
+                raise HTTPStatusError("simple api not found", request=resp.request, response=resp)
+        except HTTPStatusError:
+            logger.debug("[stream_chat_message] simple-api not available, falling back to generic endpoint")
+            # Fallback to the generic endpoint (may stream)
+            resp = await client.post(
+                f"{ONYX_API_SERVER_URL}/chat/send-message",
+                json=payload,
+                cookies=cookies,
+            )
+        logger.debug(f"[stream_chat_message] Response status={resp.status_code} ctype={resp.headers.get('content-type')}")
+        resp.raise_for_status()
+        # Depending on deployment, Onyx may return SSE stream or JSON.
+        ctype = resp.headers.get("content-type", "")
+        if ctype.startswith("text/event-stream"):
+            full_answer = ""
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                payload = line.removeprefix("data: ").strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    packet = json.loads(payload)
+                except Exception:
+                    continue
+                if packet.get("answer_piece"):
+                    full_answer += packet["answer_piece"]
+            return full_answer
+        # Fallback JSON response
+        try:
+            data = resp.json()
+            return data.get("answer") or data.get("answer_citationless") or ""
+        except Exception:
+            return resp.text.strip()
+
+# ------------ utility to parse markdown outline (very simple) -------------
+
+def _parse_outline_markdown(md: str) -> List[Dict[str, Any]]:
+    logger.debug(f"[_parse_outline_markdown] Raw MD length={len(md)}")
+    modules: List[Dict[str, Any]] = []
+    current = None
+    for line in md.splitlines():
+        line = line.strip()
+        # Detect module headings
+        if line.startswith("## "):
+            title_part = line.lstrip("# ").strip()
+            # allow both "Module X: Title" or plain title
+            if ":" in title_part:
+                title_part = title_part.split(":", 1)[-1].strip()
+            current = {
+                "id": f"mod{len(modules) + 1}",
+                "title": title_part,
+                "lessons": [],
+            }
+            modules.append(current)
+            continue
+
+        # Detect lesson lines if we're inside a module
+        if current and (line.startswith("- ") or line.startswith("* ") or line.lstrip().startswith("1.")):
+            # Remove list marker ("- ", "* ", "1. " etc.)
+            lesson_text = line.lstrip("-* ")
+            lesson_text = re.sub(r"^\d+\.\s*", "", lesson_text).strip()
+            # Strip bold markers if present
+            if lesson_text.startswith("**") and "**" in lesson_text[2:]:
+                lesson_text = lesson_text.split("**", 2)[1]
+            current["lessons"].append(lesson_text)
+            continue
+
+    if not modules:
+        logger.debug("[_parse_outline_markdown] No module headings detected, using fallback parser")
+        tmp_module = {"id": "mod1", "title": "Outline", "lessons": []}
+        for line in md.splitlines():
+            if line.strip():
+                tmp_module["lessons"].append(line.strip())
+        modules.append(tmp_module)
+
+    return modules
+
+    # Fallback: attempt a very naive parse if no headings detected
+    if not modules:
+        tmp_module = {"id": "mod1", "title": "Outline", "lessons": []}
+        for line in md.splitlines():
+            if line.strip():
+                tmp_module["lessons"].append(line.strip())
+        modules.append(tmp_module)
+
+# ----------------------- ENDPOINTS ---------------------------------------
+
+@app.post("/api/custom/course-outline/preview")
+async def wizard_outline_preview(payload: OutlineWizardPreview, request: Request):
+    logger.info(f"[wizard_outline_preview] prompt='{payload.prompt[:50]}...' modules={payload.modules} lessonsPerModule={payload.lessonsPerModule} lang={payload.language}")
+    cookies = {ONYX_SESSION_COOKIE_NAME: request.cookies.get(ONYX_SESSION_COOKIE_NAME)}
+
+    # We now always accumulate the full answer first and return it at once (no SSE streaming)
+    
+    persona_id = await get_contentbuilder_persona_id(cookies)
+    chat_id = await create_onyx_chat_session(persona_id, cookies)
+
+    wizard_message = (
+        "WIZARD_REQUEST\n" +
+        json.dumps({
+            "product": "Course Outline",
+            "prompt": payload.prompt,
+            "modules": payload.modules,
+            "lessonsPerModule": payload.lessonsPerModule,
+            "language": payload.language,
+        })
+    )
+
+    # --- collect streamed answer pieces ---
+    assistant_reply: str = ""
+    async with httpx.AsyncClient(timeout=None) as client:
+        send_payload = {
+            "chat_session_id": chat_id,
+            "message": wizard_message,
+            "parent_message_id": None,
+            "file_descriptors": [],
+            "user_file_ids": [],
+            "user_folder_ids": [],
+            "prompt_id": None,
+            "search_doc_ids": None,
+            "retrieval_options": {"run_search": "always", "real_time": False},
+            "stream_response": True,
+        }
+        async with client.stream("POST", f"{ONYX_API_SERVER_URL}/chat/send-message", json=send_payload, cookies=cookies) as resp:
+            async for raw_line in resp.aiter_lines():
+                if not raw_line:
+                    continue
+                # Onyx may send either plain JSON lines or SSE lines beginning with "data: "
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    line = line.split("data:", 1)[1].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    pkt = json.loads(line)
+                    print('\n pkt: \n', pkt)
+                    if "answer_piece" in pkt:
+                        print('\n piece: \n', pkt["answer_piece"].replace("\\n", "\n"))
+                        assistant_reply += pkt["answer_piece"].replace("\\n", "\n")
+                except Exception:
+                    continue
+
+    print('\n assistant_reply: \n', assistant_reply)
+
+    modules_preview = _parse_outline_markdown(assistant_reply)
+
+    print('\n modules_preview: \n', modules_preview)
+
+    return {"modules": modules_preview, "raw": assistant_reply}
+
+async def _ensure_training_plan_template(pool: asyncpg.Pool) -> int:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id FROM design_templates WHERE component_name = $1 LIMIT 1", COMPONENT_NAME_TRAINING_PLAN)
+        if row:
+            return row["id"]
+        # create minimal template
+        row = await conn.fetchrow(
+            """
+            INSERT INTO design_templates (template_name, template_structuring_prompt, microproduct_type, component_name)
+            VALUES ($1, $2, $3, $4) RETURNING id;
+            """,
+            "Training Plan", DEFAULT_TRAINING_PLAN_JSON_EXAMPLE_FOR_LLM, "Training Plan", COMPONENT_NAME_TRAINING_PLAN
+        )
+        return row["id"]
+
+@app.post("/api/custom/course-outline/finalize")
+async def wizard_outline_finalize(payload: OutlineWizardFinalize, request: Request, pool: asyncpg.Pool = Depends(get_db_pool)):
+    cookies = {ONYX_SESSION_COOKIE_NAME: request.cookies.get(ONYX_SESSION_COOKIE_NAME)}
+    if not cookies[ONYX_SESSION_COOKIE_NAME]:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    persona_id = await get_contentbuilder_persona_id(cookies)
+    chat_id = await create_onyx_chat_session(persona_id, cookies)
+    wizard_message = (
+        "WIZARD_REQUEST\n" +
+        json.dumps({
+            "product": "Course Outline",
+            "prompt": payload.prompt,
+            "modules": payload.modules,
+            "lessonsPerModule": payload.lessonsPerModule,
+            "language": payload.language,
+            "editedOutline": payload.editedOutline,
+        })
+    )
+    assistant_reply = await stream_chat_message(chat_id, wizard_message, cookies)
+
+    # ensure template exists
+    template_id = await _ensure_training_plan_template(pool)
+
+    project_request = ProjectCreateRequest(
+        projectName=payload.prompt,
+        design_template_id=template_id,
+        microProductName=None,
+        aiResponse=assistant_reply,
+        chatSessionId=uuid.UUID(chat_id) if chat_id else None,
+    )
+    onyx_user_id = await get_current_onyx_user_id(request)
+    project_db = await add_project_to_custom_db(project_request, onyx_user_id, pool)  # type: ignore
+    return project_db
+
+# ======================= End Wizard Section ==============================
