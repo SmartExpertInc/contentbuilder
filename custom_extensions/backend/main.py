@@ -1238,7 +1238,7 @@ async def add_project_to_custom_db(project_data: ProjectCreateRequest, onyx_user
 
     2.  **`type: "paragraph"`**
         * `text` (string): Full paragraph text.
-        * `isRecommendation` (boolean, optional): If this paragraph is a 'recommendation' within a numbered list item, set this to `true`. Or set this to true if it is a concluding thoght in the very end of the lesson (this case applies only to one VERY last thought). Cannot be 'true' for ALL the elements in one list. HAS to be 'true' if starts with 'Recommendation' or similar and isn't a part of the buller list.
+        * `isRecommendation` (boolean, optional): If this paragraph is a 'recommendation' within a numbered list item, set this to `true`. Or set this to true if it is a concluding thoght in the very end of the lesson (this case applies only to one VERY last thought). Cannot be 'true' for ALL the elements in one list. HAS to be 'true' if the paragraph starts with the keyword for recommendation — e.g., 'Recommendation', 'Рекомендация', 'Рекомендація' — or their localized equivalents, and isn't a part of the buller list.
 
     3.  **`type: "bullet_list"`**
         * `items` (array of `ListItem`): Can be strings or other nested content blocks.
@@ -1262,6 +1262,11 @@ async def add_project_to_custom_db(project_data: ProjectCreateRequest, onyx_user
     * Make sure to not have any tags in '<>' brackets (e.g. '<u>') in the list elements, UNLESS it is logically a part of the lesson.
     * Do NOT remove the '**' from the text, treat it as an equal part of the text. Moreover, ADD '**' around short parts of the text if you are sure that they should be bold.
     * Make sure to analyze the numbered lists in depth to not break their logically intended structure.
+
+    Important Localization Rule: All auxiliary headings or keywords such as "Recommendation", "Conclusion", "Create from scratch", "Goal", etc. MUST be translated into the same language as the surrounding content. Examples:
+      • Ukrainian → "Рекомендація", "Висновок", "Створити з нуля"
+      • Russian   → "Рекомендация", "Заключение", "Создать с нуля"
+      • Spanish   → "Recomendación", "Conclusión", "Crear desde cero"
 
     Return ONLY the JSON object. 
             """
@@ -1312,10 +1317,15 @@ async def add_project_to_custom_db(project_data: ProjectCreateRequest, onyx_user
             *   Parse `{isImportant}` on headlines to the `isImportant` boolean field.
             *   Parse `{iconName}` on headlines to the `iconName` string field.
             *   After extracting `iconName` and `isImportant` values, you MUST remove their corresponding `{...}` tags from the final headline `text` field. The user should not see these tags in the output text.
-            *   If a paragraph starts with `**Recommendation:**` (or a translation like `**Рекомендация:**`), you MUST set the `isRecommendation` field on that paragraph block to `true` and remove the keyword itself from the final `text` field.
+            *   If a paragraph starts with `**Recommendation:**` (or a localized translation like `**Рекомендация:**`, `**Рекомендація:**`), you MUST set the `isRecommendation` field on that paragraph block to `true` and remove the keyword itself from the final `text` field.
             *   Do NOT remove the `**` from the text for any other purpose; treat it as part of the text. It is critical that you preserve the double-asterisk (`**`) markdown for bold text within all `text` fields.
             *   You are encouraged to use a diverse range of the available `iconName` values to make the presentation visually engaging.
             *   If the raw text starts with `# Title`, this becomes the `textTitle`. The `contentBlocks` should not include this Level 1 headline. All other headlines (`##`, `###`, `####`) are content blocks.
+
+            Important Localization Rule: All auxiliary headings or keywords such as "Recommendation", "Conclusion", "Create from scratch", "Goal", etc. MUST be translated into the same language as the surrounding content. Examples:
+              • Ukrainian → "Рекомендація", "Висновок", "Створити з нуля"
+              • Russian   → "Рекомендация", "Заключение", "Создать с нуля"
+              • Spanish   → "Recomendación", "Conclusión", "Crear desde cero"
 
             Return ONLY the JSON object.
             """
@@ -2172,12 +2182,14 @@ class OutlineWizardPreview(BaseModel):
     modules: int
     lessonsPerModule: str
     language: str = "en"
+    chatSessionId: Optional[str] = None
 
 class OutlineWizardFinalize(BaseModel):
     prompt: str
     modules: int
     lessonsPerModule: str
     language: str = "en"
+    chatSessionId: Optional[str] = None
     editedOutline: Dict[str, Any]
 
 _CONTENTBUILDER_PERSONA_CACHE: Optional[int] = None
@@ -2274,15 +2286,55 @@ async def stream_chat_message(chat_session_id: str, message: str, cookies: Dict[
 # ------------ utility to parse markdown outline (very simple) -------------
 
 def _parse_outline_markdown(md: str) -> List[Dict[str, Any]]:
-    logger.debug(f"[_parse_outline_markdown] Raw MD length={len(md)}")
+    """Parse the markdown outline produced by the assistant into a lightweight
+    list-of-modules representation expected by the wizard UI.
+
+    Rules we rely on (per STRICT MARKDOWN FORMATTING):
+    • Module headings begin with "## " (any language).
+    • Lesson titles are Top-level list items that appear *without* indentation
+      directly under a module and look like one of:
+          "1. **Lesson Title**"   (English/Ukr/Ukr numbered)
+          "- **Lesson Title**"    (Russian hyphen list)
+
+      Detail rows (Time, Content Coverage, etc.) are bullet items too, but they
+      are indented by two spaces in the markdown – we can tell the difference
+      by the presence of leading spaces *before* the list marker.
+
+    Approach:
+        – Preserve leading whitespace to measure indentation.
+        – Treat a line as a lesson item *only* when indentation == 0 and it
+          matches the list-item pattern.
+    """
+
     modules: List[Dict[str, Any]] = []
-    current = None
-    for line in md.splitlines():
-        line = line.strip()
-        # Detect module headings
+    current: Optional[Dict[str, Any]] = None
+
+    list_item_regex = re.compile(r"^(?:- |\* |\d+\.)")
+    _buf: List[str] = []  # buffer for current lesson lines
+
+    def flush_current_lesson(buf: List[str]) -> Optional[str]:
+        """Combine buffered lines into a single lesson string."""
+        if not buf:
+            return None
+        return "\n".join(buf)
+
+    for raw_line in md.splitlines():
+        if not raw_line.strip():
+            continue  # skip empty lines
+
+        indent = len(raw_line) - len(raw_line.lstrip())
+        line = raw_line.lstrip()
+
+        # Module detection
         if line.startswith("## "):
+            # flush any buffered lesson into previous module before switching
+            if current:
+                last_lesson = flush_current_lesson(_buf)
+                if last_lesson:
+                    current["lessons"].append(last_lesson)
+                _buf = []
+
             title_part = line.lstrip("# ").strip()
-            # allow both "Module X: Title" or plain title
             if ":" in title_part:
                 title_part = title_part.split(":", 1)[-1].strip()
             current = {
@@ -2293,34 +2345,51 @@ def _parse_outline_markdown(md: str) -> List[Dict[str, Any]]:
             modules.append(current)
             continue
 
-        # Detect lesson lines if we're inside a module
-        if current and (line.startswith("- ") or line.startswith("* ") or line.lstrip().startswith("1.")):
-            # Remove list marker ("- ", "* ", "1. " etc.)
-            lesson_text = line.lstrip("-* ")
-            lesson_text = re.sub(r"^\d+\.\s*", "", lesson_text).strip()
-            # Strip bold markers if present
-            if lesson_text.startswith("**") and "**" in lesson_text[2:]:
-                lesson_text = lesson_text.split("**", 2)[1]
-            current["lessons"].append(lesson_text)
-            continue
+        # Lesson detection – only consider top-level list items (indent == 0)
+        if current:
+            if indent == 0 and list_item_regex.match(line):
+                # Starting a new top-level lesson → flush previous buffer
+                ls_string = flush_current_lesson(_buf) if '_buf' in locals() else None
+                if ls_string:
+                    current["lessons"].append(ls_string)
+                _buf = []  # reset buffer for new lesson
 
+                lesson_title = re.sub(r"^(?:- |\* |\d+\.\s*)", "", line).strip()
+                if lesson_title.startswith("**") and "**" in lesson_title[2:]:
+                    lesson_title = lesson_title.split("**", 2)[1].strip()
+                _buf.append(lesson_title)
+                continue
+            elif current.get('lessons') is not None and '_buf' in locals():
+                # inside a lesson details block (indented)
+                if indent > 0:
+                    _buf.append(line)
+                continue
+
+    # flush buffer after loop to whichever module is active
+    if current:
+        last_lesson = flush_current_lesson(_buf)
+        if last_lesson:
+            current["lessons"].append(last_lesson)
+
+    # Fallback when no module headings present
     if not modules:
-        logger.debug("[_parse_outline_markdown] No module headings detected, using fallback parser")
         tmp_module = {"id": "mod1", "title": "Outline", "lessons": []}
-        for line in md.splitlines():
-            if line.strip():
-                tmp_module["lessons"].append(line.strip())
+        for raw_line in md.splitlines():
+            if not raw_line.strip():
+                continue
+            indent = len(raw_line) - len(raw_line.lstrip())
+            line = raw_line.lstrip()
+            if indent == 0 and list_item_regex.match(line):
+                txt = re.sub(r"^(?:- |\* |\d+\.\s*)", "", line).strip()
+                if txt.startswith("**") and "**" in txt[2:]:
+                    txt = txt.split("**", 2)[1].strip()
+                tmp_module["lessons"].append(txt)
+        if not tmp_module["lessons"]:
+            # As very last resort just dump all lines
+            tmp_module["lessons"] = [l.strip() for l in md.splitlines() if l.strip()]
         modules.append(tmp_module)
 
     return modules
-
-    # Fallback: attempt a very naive parse if no headings detected
-    if not modules:
-        tmp_module = {"id": "mod1", "title": "Outline", "lessons": []}
-        for line in md.splitlines():
-            if line.strip():
-                tmp_module["lessons"].append(line.strip())
-        modules.append(tmp_module)
 
 # ----------------------- ENDPOINTS ---------------------------------------
 
@@ -2329,10 +2398,11 @@ async def wizard_outline_preview(payload: OutlineWizardPreview, request: Request
     logger.info(f"[wizard_outline_preview] prompt='{payload.prompt[:50]}...' modules={payload.modules} lessonsPerModule={payload.lessonsPerModule} lang={payload.language}")
     cookies = {ONYX_SESSION_COOKIE_NAME: request.cookies.get(ONYX_SESSION_COOKIE_NAME)}
 
-    # We now always accumulate the full answer first and return it at once (no SSE streaming)
-    
-    persona_id = await get_contentbuilder_persona_id(cookies)
-    chat_id = await create_onyx_chat_session(persona_id, cookies)
+    if payload.chatSessionId:
+        chat_id = payload.chatSessionId
+    else:
+        persona_id = await get_contentbuilder_persona_id(cookies)
+        chat_id = await create_onyx_chat_session(persona_id, cookies)
 
     wizard_message = (
         "WIZARD_REQUEST\n" +
@@ -2345,47 +2415,51 @@ async def wizard_outline_preview(payload: OutlineWizardPreview, request: Request
         })
     )
 
-    # --- collect streamed answer pieces ---
-    assistant_reply: str = ""
-    async with httpx.AsyncClient(timeout=None) as client:
-        send_payload = {
-            "chat_session_id": chat_id,
-            "message": wizard_message,
-            "parent_message_id": None,
-            "file_descriptors": [],
-            "user_file_ids": [],
-            "user_folder_ids": [],
-            "prompt_id": None,
-            "search_doc_ids": None,
-            "retrieval_options": {"run_search": "always", "real_time": False},
-            "stream_response": True,
-        }
-        async with client.stream("POST", f"{ONYX_API_SERVER_URL}/chat/send-message", json=send_payload, cookies=cookies) as resp:
-            async for raw_line in resp.aiter_lines():
-                if not raw_line:
-                    continue
-                # Onyx may send either plain JSON lines or SSE lines beginning with "data: "
-                line = raw_line.strip()
-                if line.startswith("data:"):
-                    line = line.split("data:", 1)[1].strip()
-                if line == "[DONE]":
-                    break
-                try:
-                    pkt = json.loads(line)
-                    print('\n pkt: \n', pkt)
-                    if "answer_piece" in pkt:
-                        print('\n piece: \n', pkt["answer_piece"].replace("\\n", "\n"))
-                        assistant_reply += pkt["answer_piece"].replace("\\n", "\n")
-                except Exception:
-                    continue
+    # ---------- StreamingResponse with keep-alive -----------
+    async def streamer():
+        assistant_reply: str = ""
+        last_send = asyncio.get_event_loop().time()
 
-    print('\n assistant_reply: \n', assistant_reply)
+        async with httpx.AsyncClient(timeout=None) as client:
+            send_payload = {
+                "chat_session_id": chat_id,
+                "message": wizard_message,
+                "parent_message_id": None,
+                "file_descriptors": [],
+                "user_file_ids": [],
+                "user_folder_ids": [],
+                "prompt_id": None,
+                "search_doc_ids": None,
+                "retrieval_options": {"run_search": "always", "real_time": False},
+                "stream_response": True,
+            }
+            async with client.stream("POST", f"{ONYX_API_SERVER_URL}/chat/send-message", json=send_payload, cookies=cookies) as resp:
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if line.startswith("data:"):
+                        line = line.split("data:", 1)[1].strip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        pkt = json.loads(line)
+                        if "answer_piece" in pkt:
+                            assistant_reply += pkt["answer_piece"].replace("\\n", "\n")
+                    except Exception:
+                        continue
 
-    modules_preview = _parse_outline_markdown(assistant_reply)
+                    # send keep-alive every 8s
+                    now = asyncio.get_event_loop().time()
+                    if now - last_send > 8:
+                        yield b" "
+                        last_send = now
 
-    print('\n modules_preview: \n', modules_preview)
+        modules_preview = _parse_outline_markdown(assistant_reply)
+        final_json = json.dumps({"modules": modules_preview, "raw": assistant_reply}).encode()
+        yield final_json
 
-    return {"modules": modules_preview, "raw": assistant_reply}
+    return StreamingResponse(streamer(), media_type="application/json")
 
 async def _ensure_training_plan_template(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as conn:
@@ -2407,12 +2481,16 @@ async def wizard_outline_finalize(payload: OutlineWizardFinalize, request: Reque
     cookies = {ONYX_SESSION_COOKIE_NAME: request.cookies.get(ONYX_SESSION_COOKIE_NAME)}
     if not cookies[ONYX_SESSION_COOKIE_NAME]:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    persona_id = await get_contentbuilder_persona_id(cookies)
-    chat_id = await create_onyx_chat_session(persona_id, cookies)
+    if payload.chatSessionId:
+        chat_id = payload.chatSessionId
+    else:
+        persona_id = await get_contentbuilder_persona_id(cookies)
+        chat_id = await create_onyx_chat_session(persona_id, cookies)
     wizard_message = (
         "WIZARD_REQUEST\n" +
         json.dumps({
             "product": "Course Outline",
+            "action": "finalize",
             "prompt": payload.prompt,
             "modules": payload.modules,
             "lessonsPerModule": payload.lessonsPerModule,
@@ -2420,20 +2498,68 @@ async def wizard_outline_finalize(payload: OutlineWizardFinalize, request: Reque
             "editedOutline": payload.editedOutline,
         })
     )
-    assistant_reply = await stream_chat_message(chat_id, wizard_message, cookies)
 
-    # ensure template exists
-    template_id = await _ensure_training_plan_template(pool)
+    # --- collect streamed answer pieces exactly like in preview ---
+    async def streamer():
+        assistant_reply: str = ""
+        last_send = asyncio.get_event_loop().time()
 
-    project_request = ProjectCreateRequest(
-        projectName=payload.prompt,
-        design_template_id=template_id,
-        microProductName=None,
-        aiResponse=assistant_reply,
-        chatSessionId=uuid.UUID(chat_id) if chat_id else None,
-    )
-    onyx_user_id = await get_current_onyx_user_id(request)
-    project_db = await add_project_to_custom_db(project_request, onyx_user_id, pool)  # type: ignore
-    return project_db
+        async with httpx.AsyncClient(timeout=None) as client:
+            send_payload = {
+                "chat_session_id": chat_id,
+                "message": wizard_message,
+                "parent_message_id": None,
+                "file_descriptors": [],
+                "user_file_ids": [],
+                "user_folder_ids": [],
+                "prompt_id": None,
+                "search_doc_ids": None,
+                "retrieval_options": {"run_search": "always", "real_time": False},
+                "stream_response": True,
+            }
+            async with client.stream("POST", f"{ONYX_API_SERVER_URL}/chat/send-message", json=send_payload, cookies=cookies) as resp:
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if line.startswith("data:"):
+                        line = line.split("data:", 1)[1].strip()
+                    if line == "[DONE]":
+                        break
+                    try:
+                        pkt = json.loads(line)
+                        if "answer_piece" in pkt:
+                            assistant_reply += pkt["answer_piece"].replace("\\n", "\n")
+                    except Exception:
+                        continue
+
+                    now = asyncio.get_event_loop().time()
+                    if now - last_send > 8:
+                        yield b" "
+                        last_send = now
+
+        template_id = await _ensure_training_plan_template(pool)
+
+        project_request = ProjectCreateRequest(
+            projectName=payload.prompt,
+            design_template_id=template_id,
+            microProductName=None,
+            aiResponse=assistant_reply,
+            chatSessionId=uuid.UUID(chat_id) if chat_id else None,
+        )
+        onyx_user_id = await get_current_onyx_user_id(request)
+        project_db = await add_project_to_custom_db(project_request, onyx_user_id, pool)  # type: ignore
+
+        yield project_db.model_dump_json().encode() if hasattr(project_db, 'model_dump_json') else project_db.json().encode()
+
+    return StreamingResponse(streamer(), media_type="application/json")
+
+@app.post("/api/custom/course-outline/init-chat")
+async def init_course_outline_chat(request: Request):
+    """Pre-create Chat Session & persona so subsequent preview calls are faster."""
+    cookies = request.cookies
+    persona_id = await get_contentbuilder_persona_id(cookies)
+    chat_id = await create_onyx_chat_session(persona_id, cookies)
+    return {"personaId": persona_id, "chatSessionId": chat_id}
 
 # ======================= End Wizard Section ==============================
